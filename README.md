@@ -15,8 +15,8 @@ aucun `node_modules` : un seul `.wasm` de ~570 Ko.
 
 - **Caméra → texture GPU en un appel par image** (`queue.copy_external_image_to_texture`) : l'image ne
   repasse **jamais** par le CPU dans le cas nominal.
-- **Filtres WGSL chaînables en ping-pong de textures** — chaque filtre est une passe ; en ajouter un
-  consiste à ajouter une passe et deux lignes dans un shader :
+- **Filtres WGSL combinables en deux passes**, colorimétrique puis spatiale si nécessaire,
+  avec ping-pong de textures :
 
   | Touche | Filtre |
   |---|---|
@@ -25,19 +25,66 @@ aucun `node_modules` : un seul `.wasm` de ~570 Ko.
   | `3` | Flou (5 taps) |
   | `4` | Fisheye |
   | `5` | Vignette |
+  | `6` | Prisme (aberration chromatique) |
 
   S'y ajoutent, toujours branchés : grain argentique, température, saturation, contraste, étalonnage.
   Tous pilotés par **un unique tampon d'uniformes** (16 `f32` = 64 octets).
-- **Interface vectorielle `vello_gpu` composée en `SrcOver` par-dessus l'image** : voiles haut et bas,
-  **5 pastilles à animation ressort** (sélection, halo, soulignement animé), **obturateur** qui
-  « respire », **pastille REC** qui pulse, **flash** de capture. Composer en `SrcOver` est ce qui
-  permet à l'UI et à l'image filtrée de partager un seul appareil et un seul canvas, sans
-  aller-retour CPU.
-- **Photo** (`Espace`, ou clic sur l'obturateur) : relecture des pixels **depuis le GPU**
-  (`copy_texture_to_buffer` + `map_async`) → PNG.
-- **Vidéo** (`R`) : `canvas.captureStream(60)` + `MediaRecorder` → les **filtres et l'UI sont
-  incrustés** dans le fichier.
-- **Interactions** : souris (hit-test des pastilles côté Rust) **et** clavier.
+- **Interface vectorielle Vello composée en `SrcOver`** : voiles à dégradé continu, six filtres
+  combinables, palette anthracite / ivoire / citron vert, grand obturateur et commandes distinctes
+  vidéo / grille. L'image reste au centre, sans cadre ni légende technique superposée.
+- **Mobile d'abord** : une rangée de filtres en portrait, deux sur écran très étroit ; en paysage
+  court, deux rangées à gauche et les commandes de capture à droite. Les cibles mesurent au moins
+  **44 × 44 px CSS**, indépendamment du DPR. L'obturateur mesure 76 × 76 px.
+- **Toucher, souris et stylet** : `pointerdown` donne un retour immédiat, la capture du pointeur
+  assure le suivi hors du canvas et seul le relâchement sur la cible d'origine valide l'action.
+  Sortir puis revenir réarme la cible ; relâcher ailleurs, `pointercancel`, perte de capture,
+  perte de focus ou redimensionnement annulent le geste. Les doigts secondaires sont ignorés.
+- **Animations** : compression / relâchement amortis, ressorts de sélection avec sous-pas stables,
+  apparition des pictogrammes, transition progressive des filtres eux-mêmes, fondu de la grille,
+  transition du point vidéo au carré stop, pulsation REC et flash photo.
+- **Photo** (`Espace`, ou obturateur) : relecture GPU (`copy_texture_to_buffer` + `map_async`) → PNG
+  sans UI. Command buffer de capture séparé et garde `capture_busy` conservés.
+- **Vidéo** (`R`) : `canvas.captureStream(60)` + `MediaRecorder` ; le dessin Vello est inclus,
+  les libellés HTML ne le sont pas. La photo reste disponible pendant l'enregistrement.
+- **Grille des tiers** (`G`) et **réinitialisation des six filtres** (`0`). `1` à `6` combinent les
+  filtres. `Tab` parcourt les commandes ; `Espace` / `Entrée` activent le bouton focalisé.
+
+### Choix d'interface
+
+Le dessin et le mouvement restent dans `src/ui.rs`. Les libellés, le statut et les boutons
+sémantiques sont en HTML pour une typographie nette, les lecteurs d'écran (`aria-pressed`,
+statut annoncé) et le clavier. Leurs positions viennent du **même calcul Rust** que les cibles
+Vello ; ils ne capturent pas les événements du pointeur et n'ajoutent pas de logique d'UI JS.
+
+Le conteneur commun réserve `env(safe-area-inset-*)` : les coordonnées Vello commencent donc
+**à l'intérieur de la zone sûre**, sans estimation de l'encoche côté Rust. Cela laisse une bande
+sombre dans les zones système plutôt que de placer la caméra ou les commandes sous celles-ci.
+`touch-action: none` sur le canvas supprime les gestes navigateur et le délai de double-tap ;
+le viewport conserve le zoom accessible ailleurs, sans `user-scalable=no`.
+
+Le module conserve la `Scene` avec `reset()`, deux tracés unitaires réutilisés par transformations,
+des tableaux fixes et deux dégradés calculés au redimensionnement. Aucun nouveau `Vec`, tracé
+ou texte formaté n'est construit par image par la couche UI. Aucune dépendance ajoutée.
+Les contrôles vidéo et photo restent distincts pour que l'action de l'obturateur soit sans ambiguïté.
+Les réglages avancés sont volontairement absents pour garder le viseur lisible.
+
+### Vérifier l'interface
+
+Les tests purs de géométrie et de gestes s'exécutent sans navigateur ni GPU :
+
+```bash
+rustc --edition=2021 --test src/ui/layout.rs -o /tmp/vello-layout-tests
+/tmp/vello-layout-tests
+rustc --edition=2021 --test src/ui/gesture.rs -o /tmp/vello-gesture-tests
+/tmp/vello-gesture-tests
+```
+
+Ils couvrent huit dimensions (portrait, paysage, bureau), l'absence de chevauchement, les cibles
+minimales, l'appui / relâchement unique, la sortie / rentrée, l'annulation et le second doigt.
+La compilation release WASM est vérifiée. Le navigateur et le serveur HTTP ne pouvant pas démarrer
+dans le sandbox de cette refonte, **la validation visuelle sur téléphone, les 60 fps et les tests
+médias en exécution restent à refaire**. Les preuves GPU historiques ci-dessous ne constituent
+pas une nouvelle exécution des auto-tests après la refonte.
 
 ## Le pipeline d'une image
 
@@ -151,8 +198,7 @@ soumission contenant la texture de surface ne se termine qu'une fois le canvas c
 
 ## Suite possible
 
-- Filtres : aberration chromatique (le shader est déjà écrit), LUT / étalonnage avancé, bloom,
-  pixelisation.
+- Filtres : LUT / étalonnage avancé, bloom, pixelisation.
 - Texte dessiné dans Vello (`GlyphRunBuilder`, en embarquant une police) pour supprimer la légende
   HTML.
 - Cible native : `winit` + le même renderer, sans navigateur.

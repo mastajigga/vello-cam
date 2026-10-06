@@ -24,6 +24,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      # La logique d'interface (mise en page, gestes) est du Rust pur : on peut la
+      # tester sans navigateur ni GPU, alors que `cargo test` ne le peut pas.
+      - name: Tester la logique d'interface
+        run: ./scripts/test-ui-logic.sh
+
       # Binaire precompile : `cargo install wasm-pack` le compilerait, plusieurs minutes pour rien.
       - name: Installer wasm-pack
         run: |

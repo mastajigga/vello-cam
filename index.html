@@ -5,88 +5,64 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>vello-cam — caméra GPU</title>
 <style>
-  :root{
-    --accent:#4cf0d6;
-    --ink:#eef2f6;
-    --muted:#8f98a6;
-    --line:rgba(255,255,255,.10);
-  }
+  :root{--accent:#ddf693;--ink:#f7f8ed;--muted:#bcc8c3;--line:#ffffff26}
   *{box-sizing:border-box}
-  html,body{margin:0;height:100%;background:#06070a;overflow:hidden;
-    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,system-ui,sans-serif;
-    color:var(--ink);-webkit-font-smoothing:antialiased}
-  #gpu{display:block;width:100vw;height:100vh;cursor:pointer}
-
-  /* sources jamais montrées : elles n'alimentent que des textures GPU */
+  html,body{margin:0;height:100%;overflow:hidden;touch-action:manipulation;background:#040c0d;color:var(--ink);
+    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+  /* Same safe rectangle for the GPU canvas, its Rust coordinates and DOM labels. */
+  #stage{position:fixed;inset:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+  #gpu{display:block;width:100%;height:100%;touch-action:none;user-select:none;-webkit-user-select:none}
   #cam{position:fixed;left:-8px;top:-8px;width:2px;height:2px;opacity:.01;pointer-events:none}
   #copy{display:none}
-
-  .bar{position:fixed;inset:0 0 auto 0;display:flex;align-items:flex-start;justify-content:space-between;
-    gap:16px;padding:18px 22px;pointer-events:none;
-    background:linear-gradient(180deg,rgba(4,6,10,.74),rgba(4,6,10,0))}
-  .brand{display:flex;align-items:center;gap:10px;min-width:0}
-  .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);
-    box-shadow:0 0 0 4px rgba(76,240,214,.14)}
-  .name{font-weight:650;letter-spacing:.02em}
-  .tag{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:999px;
-    padding:2px 9px;white-space:nowrap}
-  .right{text-align:right;font-size:12px;color:var(--muted)}
-  #hud{font-variant-numeric:tabular-nums;color:var(--ink);opacity:.85}
-  #stat{margin-top:3px}
-
-  .legend{position:fixed;left:22px;top:74px;display:flex;flex-wrap:wrap;gap:4px 14px;
-    max-width:min(560px,72vw);pointer-events:none;font-size:12px;color:var(--muted)}
-  .legend b{color:var(--ink);font-weight:600}
-  kbd{font:inherit;font-size:11px;border:1px solid var(--line);border-bottom-width:2px;
-    border-radius:5px;padding:1px 5px;color:var(--ink);background:rgba(255,255,255,.05)}
-
-  .foot{position:fixed;left:22px;bottom:14px;font-size:11px;color:var(--muted);opacity:.62;
-    pointer-events:none;max-width:46vw}
-
+  .bar{position:absolute;left:20px;top:16px;right:76px;pointer-events:none}
+  .brand{display:flex;align-items:baseline;gap:12px}
+  .name{font-size:23px;font-weight:650;letter-spacing:-1px}
+  .tag{font-size:9px;letter-spacing:2px;color:var(--accent)}
+  .right{margin-top:4px;font-size:10px;color:var(--muted)}
+  #hud{font-variant-numeric:tabular-nums;letter-spacing:1px}
+  #stat{margin-top:5px;max-width:320px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .control{position:absolute;background:transparent;border:0;color:var(--ink);padding:0;
+    font:500 10px/1 sans-serif;letter-spacing:.25px;text-align:center;pointer-events:none;
+    display:flex;align-items:flex-end;justify-content:center;padding-bottom:5px;text-shadow:0 1px 5px #000}
+  .control[aria-pressed=true]{color:var(--accent)}
+  .control:focus-visible{outline:1px solid var(--accent);outline-offset:2px;border-radius:12px}
+  #photo{color:transparent;text-shadow:none}
   .overlay{position:fixed;inset:0;display:grid;place-items:center;text-align:center;padding:28px;
-    background:rgba(6,7,10,.86);backdrop-filter:blur(8px);z-index:5}
+    background:#06100feb;backdrop-filter:blur(8px);z-index:5}
   .overlay.hide{display:none}
-  .overlay h1{font-size:17px;margin:0 0 8px;font-weight:650}
-  .overlay p{margin:0 0 16px;color:var(--muted);font-size:13px;max-width:44ch}
-  .overlay code{background:rgba(255,255,255,.07);border:1px solid var(--line);
-    border-radius:6px;padding:2px 7px;font-size:12px}
-  button{font:inherit;font-weight:600;color:#04120f;background:var(--accent);border:0;
-    border-radius:10px;padding:11px 18px;cursor:pointer}
-  button:active{transform:translateY(1px)}
-  .spinner{width:22px;height:22px;border:2px solid rgba(255,255,255,.18);
-    border-top-color:var(--accent);border-radius:50%;margin:0 auto 14px;
-    animation:spin .9s linear infinite}
+  .overlay h1{font-size:22px;margin:0 0 12px;font-weight:600}
+  .overlay p{margin:0 0 20px;color:var(--muted);font-size:14px;max-width:44ch}
+  .overlay code{background:#ffffff12;border-radius:6px;padding:2px 7px;font-size:12px}
+  .overlay button{font:inherit;font-weight:600;color:#152214;background:var(--accent);border:0;
+    border-radius:24px;min-height:48px;padding:12px 24px;cursor:pointer}
+  .spinner{width:26px;height:26px;border:2px solid #ffffff26;border-top-color:var(--accent);
+    border-radius:50%;margin:0 auto 22px;animation:spin .9s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
+  @media(max-height:420px){#stat{display:none}.tag{display:none}}
 </style>
 </head>
 <body>
-  <canvas id="gpu"></canvas>
+  <div id="stage">
+  <canvas id="gpu" aria-label="Aperçu caméra avec filtres GPU"></canvas>
+  <div class="bar">
+    <div class="brand"><span class="name">vello</span><span class="tag">CAMÉRA CRÉATIVE</span></div>
+    <div class="right"><div id="hud">CAMÉRA · GPU</div><div id="stat" role="status" aria-live="polite">initialisation…</div></div>
+  </div>
+  <div role="group" aria-label="Filtres combinables et capture">
+    <button class="control" id="mono" aria-label="Noir et blanc, touche 1" aria-pressed="false">N&amp;B</button>
+    <button class="control" id="sepia" aria-label="Sépia, touche 2" aria-pressed="false">SÉPIA</button>
+    <button class="control" id="blur" aria-label="Flou, touche 3" aria-pressed="false">FLOU</button>
+    <button class="control" id="lens" aria-label="Fisheye, touche 4" aria-pressed="false">LENTILLE</button>
+    <button class="control" id="vignette" aria-label="Vignette, touche 5" aria-pressed="false">VIGNETTE</button>
+    <button class="control" id="prism" aria-label="Aberration chromatique, touche 6" aria-pressed="false">PRISME</button>
+    <button class="control" id="photo" aria-label="Prendre une photo, Espace">PHOTO</button>
+    <button class="control" id="record" aria-label="Démarrer ou arrêter la vidéo, R" aria-pressed="false">VIDÉO</button>
+    <button class="control" id="grid" aria-label="Grille des tiers, G" aria-pressed="false">GRILLE</button>
+    <button class="control" id="reset" aria-label="Réinitialiser les filtres, touche 0">RESET</button>
+  </div>
+  </div>
   <video id="cam" playsinline muted autoplay></video>
   <canvas id="copy"></canvas>
-
-  <div class="bar">
-    <div class="brand">
-      <span class="dot"></span>
-      <span class="name">vello-cam</span>
-      <span class="tag">Rust → WASM → WebGPU</span>
-    </div>
-    <div class="right">
-      <div id="hud">—</div>
-      <div id="stat">initialisation…</div>
-    </div>
-  </div>
-
-  <div class="legend">
-    <span><kbd>1</kbd> <b>N&amp;B</b></span>
-    <span><kbd>2</kbd> <b>Sépia</b></span>
-    <span><kbd>3</kbd> <b>Flou</b></span>
-    <span><kbd>4</kbd> <b>Fisheye</b></span>
-    <span><kbd>5</kbd> <b>Vignette</b></span>
-    <span><kbd>Espace</kbd> photo</span>
-    <span><kbd>R</kbd> vidéo</span>
-  </div>
-
-  <div class="foot">filtres WGSL en ping-pong · UI vectorielle vello_gpu composée en SrcOver</div>
 
   <div class="overlay" id="boot">
     <div>
@@ -243,7 +219,7 @@ async function run(){
 
   try {
     const m = await import('./pkg/vello_cam.js');
-    m.default();
+    await m.default();
   } catch (e) {
     $('boot').classList.add('hide');
     $('errh').textContent = 'Erreur au chargement du WASM';

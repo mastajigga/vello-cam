@@ -5,14 +5,12 @@
 //!
 //! Capture : relecture GPU (`copy_texture_to_buffer` + `map_async`) -> PNG côté JS.
 
+mod ui;
+
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use bytemuck::{Pod, Zeroable};
-use vello_common::peniko::{
-    kurbo::{Circle, Rect, RoundedRect, Shape},
-    Color,
-};
 use vello_gpu::{
     RenderSize, RenderSettings, RenderTargetConfig, Renderer, Scene, TargetInit, TextureBindings,
 };
@@ -57,7 +55,7 @@ fn status(s: &str) {
 
 // ---------------------------------------------------------------- uniformes
 
-#[repr(C)]
+#[repr(C, align(16))]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct Filters {
     brightness: f32,
@@ -156,14 +154,8 @@ fn make_target(
 
 // ---------------------------------------------------------------- App
 
-#[derive(Copy, Clone)]
-struct Chip {
-    x: f32,
-    y: f32,
-    s: f32,
-}
-
-const NCHIP: usize = 5;
+const NCHIP: usize = 6;
+const _: () = assert!(std::mem::size_of::<Filters>() == 64);
 
 struct App {
     device: wgpu::Device,
@@ -203,9 +195,8 @@ struct App {
     sel: [f32; NCHIP],
     vel: [f32; NCHIP],
 
-    chips: Vec<Chip>,
-    shutter: (f32, f32, f32),
-    rec: (f32, f32, f32),
+    ui: ui::Ui,
+    grid: bool,
 
     t0: f64,
     t_prev: f64,
@@ -229,23 +220,7 @@ struct App {
 
 impl App {
     fn layout(&mut self) {
-        let dpr = self.dpr;
-        let (wf, hf) = (self.w as f32, self.h as f32);
-        let s = (wf * 0.052).clamp(38.0 * dpr, 56.0 * dpr);
-        let gap = s * 0.26;
-        let total = NCHIP as f32 * s + (NCHIP as f32 - 1.0) * gap;
-        let x0 = (wf - total) * 0.5;
-        let y = hf - 116.0 * dpr - s;
-        self.chips = (0..NCHIP)
-            .map(|i| Chip {
-                x: x0 + i as f32 * (s + gap),
-                y,
-                s,
-            })
-            .collect();
-        self.shutter = (wf * 0.5, hf - 56.0 * dpr, 30.0 * dpr);
-        let rs = 22.0 * dpr;
-        self.rec = (wf - 34.0 * dpr - rs, 40.0 * dpr, rs);
+        self.ui.layout(self.w as f32 / self.dpr, self.h as f32 / self.dpr);
     }
 
     fn draw(
@@ -440,7 +415,7 @@ impl App {
             return;
         }
         self.on[i] = !self.on[i];
-        let label = ["n&b", "sépia", "flou", "fisheye", "vignette"][i];
+        let label = ["n&b", "sépia", "flou", "fisheye", "vignette", "prisme"][i];
         status(&format!(
             "{} {}",
             label,
@@ -448,35 +423,26 @@ impl App {
         ));
     }
 
-    fn hit(&mut self, x: f32, y: f32) -> bool {
-        for i in 0..NCHIP {
-            let c = self.chips[i];
-            if x >= c.x && x <= c.x + c.s && y >= c.y && y <= c.y + c.s {
-                self.toggle(i);
-                return true;
+    fn activate(&mut self, id: usize) {
+        match id {
+            0..=5 => self.toggle(id),
+            6 if !self.capture_busy.get() && !self.want_capture => {
+                self.want_capture = true;
+                self.flash = 1.0;
+                status("photo…");
             }
+            7 => {
+                let next = !self.recording;
+                js("velloCamRecord", &[JsValue::from_bool(next)]);
+                // Le pont ne confirme l'état que si MediaRecorder a démarré.
+                self.recording = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("__rec"))
+                    .map(|v| !v.is_null() && !v.is_undefined()).unwrap_or(false);
+            }
+            8 => { self.grid = !self.grid; status(if self.grid { "grille des tiers" } else { "grille masquée" }); }
+            9 => { self.on.fill(false); status("filtres réinitialisés"); }
+            _ => {}
         }
-        let (cx, cy, r) = self.shutter;
-        let dx = x - cx;
-        let dy = y - cy;
-        if dx * dx + dy * dy <= (r * 1.35) * (r * 1.35) {
-            self.want_capture = true;
-            self.flash = 1.0;
-            status("photo…");
-            return true;
-        }
-        let (rx, ry, rs) = self.rec;
-        if x >= rx && x <= rx + rs && y >= ry && y <= ry + rs {
-            self.recording = !self.recording;
-            js("velloCamRecord", &[JsValue::from_bool(self.recording)]);
-            status(if self.recording {
-                "enregistrement…"
-            } else {
-                "enregistrement arrêté"
-            });
-            return true;
-        }
-        false
+        self.ui.sync(&self.on, self.recording, self.grid);
     }
 
     // ------------------------------------------------------------ frame
@@ -530,17 +496,25 @@ impl App {
         // ressorts des pastilles
         for i in 0..NCHIP {
             let target = if self.on[i] { 1.0 } else { 0.0 };
-            let a = (target - self.sel[i]) * 320.0 - self.vel[i] * 24.0;
-            self.vel[i] += a * dt;
-            self.sel[i] += self.vel[i] * dt;
+            // Sous-pas stables aussi à 20 Hz ou après une suspension d'onglet.
+            let steps = (dt * 120.0).ceil().max(1.0) as usize;
+            let step = dt / steps as f32;
+            for _ in 0..steps {
+                let a = (target - self.sel[i]) * 320.0 - self.vel[i] * 24.0;
+                self.vel[i] += a * step;
+                self.sel[i] += self.vel[i] * step;
+            }
         }
+        self.ui.animate(dt, self.grid, self.recording);
         self.flash = (self.flash - dt * 3.2).max(0.0);
 
         // taille du canvas
-        let dpr = self.dpr;
+        let dpr = web_sys::window().unwrap().device_pixel_ratio() as f32;
+        let dpr_changed = self.dpr != dpr;
+        self.dpr = dpr;
         let cw = (self.canvas.client_width() as f32 * dpr).max(1.0) as u32;
         let ch = (self.canvas.client_height() as f32 * dpr).max(1.0) as u32;
-        if cw != self.w || ch != self.h {
+        if cw != self.w || ch != self.h || dpr_changed {
             self.resize(cw, ch);
         }
 
@@ -601,11 +575,12 @@ impl App {
         // uniformes
         let f = &mut self.filters;
         f.time = self.time;
-        f.grayscale = if self.on[0] { 1.0 } else { 0.0 };
-        f.sepia = if self.on[1] { 1.0 } else { 0.0 };
-        f.blur = if self.on[2] { 0.55 } else { 0.0 };
-        f.fisheye = if self.on[3] { 0.45 } else { 0.0 };
-        f.vignette = if self.on[4] { 0.85 } else { 0.0 };
+        f.grayscale = self.sel[0].clamp(0.0, 1.0) * 1.00;
+        f.sepia = self.sel[1].clamp(0.0, 1.0) * 1.00;
+        f.blur = self.sel[2].clamp(0.0, 1.0) * 0.55;
+        f.fisheye = self.sel[3].clamp(0.0, 1.0) * 0.45;
+        f.vignette = self.sel[4].clamp(0.0, 1.0) * 0.85;
+        f.aberration = self.sel[5].clamp(0.0, 1.0) * 0.65;
         f.texel = [1.0 / self.w as f32, 1.0 / self.h as f32];
         let (ca, va) = (
             self.w as f32 / self.h as f32,
@@ -766,215 +741,7 @@ impl App {
     // ------------------------------------------------------------ UI vello
 
     fn build_ui(&mut self) {
-        let dpr = self.dpr;
-        let (wf, hf) = (self.w as f32, self.h as f32);
-        self.scene.reset();
-
-        // voiles haut/bas (faux dégradé, 10 bandes)
-        let bands = 10;
-        for i in 0..bands {
-            let a = (1.0 - i as f32 / bands as f32) * 0.30;
-            let hgt = hf * 0.13 / bands as f32;
-            self.scene
-                .set_paint(Color::from_rgba8(4, 6, 10, (a * 255.0) as u8));
-            self.scene
-                .fill_rect(&Rect::new(0.0, (i as f32 * hgt) as f64, wf as f64, (hgt * 1.4) as f64));
-            self.scene
-                .set_paint(Color::from_rgba8(4, 6, 10, (a * 255.0) as u8));
-            self.scene.fill_rect(&Rect::new(
-                0.0,
-                (hf - (i as f32 + 1.0) * hgt) as f64,
-                wf as f64,
-                (hgt * 1.4) as f64,
-            ));
-        }
-
-        // pastilles de filtres
-        for i in 0..NCHIP {
-            let chip = self.chips[i];
-            let s = self.sel[i];
-            let grow = 1.0 + 0.11 * s;
-            let cs = chip.s * grow;
-            let cx = chip.x + chip.s * 0.5;
-            let cy = chip.y + chip.s * 0.5;
-            let r = Rect::new(
-                (cx - cs * 0.5) as f64,
-                (cy - cs * 0.5) as f64,
-                (cx + cs * 0.5) as f64,
-                (cy + cs * 0.5) as f64,
-            );
-            // halo
-            if s > 0.01 {
-                let hs = cs * 1.22;
-                let hr = Rect::new(
-                    (cx - hs * 0.5) as f64,
-                    (cy - hs * 0.5) as f64,
-                    (cx + hs * 0.5) as f64,
-                    (cy + hs * 0.5) as f64,
-                );
-                self.scene
-                    .set_paint(Color::from_rgba8(56, 224, 200, (70.0 * s) as u8));
-                self.scene
-                    .fill_path(&RoundedRect::from_rect(hr, (hs * 0.32) as f64).to_path(0.1));
-            }
-            // fond de pastille
-            let bg = 0.20 + 0.30 * s;
-            self.scene.set_paint(Color::from_rgba8(
-                14,
-                18,
-                26,
-                (bg * 255.0) as u8,
-            ));
-            self.scene
-                .fill_path(&RoundedRect::from_rect(r, (cs * 0.30) as f64).to_path(0.1));
-            // soulignement actif
-            if s > 0.01 {
-                let bw = cs * 0.52 * s;
-                let bar = Rect::new(
-                    (cx - bw * 0.5) as f64,
-                    (cy + cs * 0.5 - 3.5 * dpr) as f64,
-                    (cx + bw * 0.5) as f64,
-                    (cy + cs * 0.5 - 0.5 * dpr) as f64,
-                );
-                self.scene.set_paint(Color::from_rgba8(76, 240, 214, 255));
-                self.scene
-                    .fill_path(&RoundedRect::from_rect(bar, (2.0 * dpr) as f64).to_path(0.1));
-            }
-            self.glyph(i, cx, cy, cs * 0.30, s);
-        }
-
-        // shutter
-        let (sx, sy, sr) = self.shutter;
-        let breath = 1.0 + 0.035 * (self.time * 2.0).sin();
-        self.scene
-            .set_paint(Color::from_rgba8(255, 255, 255, 46));
-        self.scene
-            .fill_path(&Circle::new((sx as f64, sy as f64), (sr * breath) as f64).to_path(0.1));
-        if self.recording {
-            let pulse = 0.55 + 0.45 * (self.time * 5.0).sin().abs();
-            self.scene.set_paint(Color::from_rgba8(
-                255,
-                66,
-                54,
-                (60.0 + 150.0 * pulse) as u8,
-            ));
-        } else {
-            self.scene.set_paint(Color::from_rgba8(242, 246, 250, 236));
-        }
-        self.scene.fill_path(
-            &Circle::new((sx as f64, sy as f64), (sr * 0.78) as f64).to_path(0.1),
-        );
-
-        // pastille REC
-        let (rx, ry, rs) = self.rec;
-        self.scene.set_paint(Color::from_rgba8(12, 14, 20, 168));
-        self.scene.fill_path(
-            &RoundedRect::from_rect(
-                Rect::new(rx as f64, ry as f64, (rx + rs) as f64, (ry + rs) as f64),
-                (rs * 0.32) as f64,
-            )
-            .to_path(0.1),
-        );
-        if self.recording {
-            let pulse = 0.6 + 0.4 * (self.time * 5.0).sin().abs();
-            self.scene.set_paint(Color::from_rgba8(
-                255,
-                66,
-                54,
-                (140.0 + 115.0 * pulse) as u8,
-            ));
-            self.scene
-                .fill_path(&Circle::new(((rx + rs * 0.5) as f64, (ry + rs * 0.5) as f64), (rs * 0.24) as f64).to_path(0.1));
-        } else {
-            self.scene.set_paint(Color::from_rgba8(255, 66, 54, 210));
-            self.scene
-                .fill_path(&Circle::new(((rx + rs * 0.5) as f64, (ry + rs * 0.5) as f64), (rs * 0.30) as f64).to_path(0.1));
-            self.scene.set_paint(Color::from_rgba8(12, 14, 20, 255));
-            self.scene
-                .fill_path(&Circle::new(((rx + rs * 0.5) as f64, (ry + rs * 0.5) as f64), (rs * 0.18) as f64).to_path(0.1));
-        }
-
-        // flash de capture
-        if self.flash > 0.001 {
-            self.scene
-                .set_paint(Color::from_rgba8(255, 255, 255, (self.flash * 190.0) as u8));
-            self.scene.fill_rect(&Rect::new(0.0, 0.0, wf as f64, hf as f64));
-        }
-    }
-
-    /// Petit pictogramme qui identifie le filtre sans texte.
-    fn glyph(&mut self, i: usize, cx: f32, cy: f32, r: f32, sel: f32) {
-        let c = (cx as f64, cy as f64);
-        match i {
-            0 => {
-                // noir & blanc : disque blanc + moitié noire
-                self.scene.set_paint(Color::from_rgba8(245, 245, 245, 255));
-                self.scene.fill_path(&Circle::new(c, r as f64).to_path(0.1));
-                self.scene.push_clip_rect(&Rect::new(
-                    cx as f64,
-                    (cy - r) as f64,
-                    (cx + r) as f64,
-                    (cy + r) as f64,
-                ));
-                self.scene.set_paint(Color::from_rgba8(12, 14, 20, 255));
-                self.scene.fill_path(&Circle::new(c, r as f64).to_path(0.1));
-                self.scene.pop_clip();
-            }
-            1 => {
-                // sépia : disque ambré + petit cœur sombre
-                self.scene.set_paint(Color::from_rgba8(198, 150, 86, 255));
-                self.scene.fill_path(&Circle::new(c, r as f64).to_path(0.1));
-                self.scene.set_paint(Color::from_rgba8(120, 78, 38, 255));
-                self.scene
-                    .fill_path(&Circle::new(c, (r * 0.42) as f64).to_path(0.1));
-            }
-            2 => {
-                // flou : cercles concentriques
-                for (k, a) in [(1.0f32, 40u8), (0.68, 90), (0.36, 220)] {
-                    self.scene
-                        .set_paint(Color::from_rgba8(226, 240, 248, a));
-                    self.scene
-                        .fill_path(&Circle::new(c, (r * k) as f64).to_path(0.1));
-                }
-            }
-            3 => {
-                // fisheye : lentille
-                self.scene
-                    .set_paint(Color::from_rgba8(226, 240, 248, 70));
-                self.scene.fill_path(&Circle::new(c, r as f64).to_path(0.1));
-                self.scene.set_paint(Color::from_rgba8(14, 18, 26, 210));
-                self.scene
-                    .fill_path(&Circle::new(c, (r * 0.62) as f64).to_path(0.1));
-                self.scene
-                    .set_paint(Color::from_rgba8(76, 240, 214, 235));
-                self.scene
-                    .fill_path(&Circle::new(c, (r * 0.26) as f64).to_path(0.1));
-            }
-            _ => {
-                // vignette : cadre sombre + cœur clair
-                self.scene.set_paint(Color::from_rgba8(6, 8, 12, 225));
-                self.scene.fill_path(
-                    &RoundedRect::from_rect(
-                        Rect::new(
-                            (cx - r) as f64,
-                            (cy - r) as f64,
-                            (cx + r) as f64,
-                            (cy + r) as f64,
-                        ),
-                        (r * 0.45) as f64,
-                    )
-                    .to_path(0.1),
-                );
-                self.scene.set_paint(Color::from_rgba8(
-                    226,
-                    240,
-                    248,
-                    (150.0 + 105.0 * sel) as u8,
-                ));
-                self.scene
-                    .fill_path(&Circle::new(c, (r * 0.34) as f64).to_path(0.1));
-            }
-        }
+        self.ui.draw(&mut self.scene, self.dpr, &self.sel, self.recording, self.time, self.flash);
     }
 }
 
@@ -1589,9 +1356,8 @@ async fn run() -> Result<(), String> {
         on: [false; NCHIP],
         sel: [0.0; NCHIP],
         vel: [0.0; NCHIP],
-        chips: Vec::new(),
-        shutter: (w as f32 * 0.5, h as f32 - 56.0, 30.0),
-        rec: (w as f32 - 56.0, 40.0, 22.0),
+        ui: ui::Ui::new(),
+        grid: false,
         t0: 0.0,
         t_prev: 0.0,
         time: 0.0,
@@ -1609,50 +1375,74 @@ async fn run() -> Result<(), String> {
     }));
     app.borrow_mut().layout();
 
-    // ---- entrées ----
+    // Pointer capture keeps release/cancel reliable outside the canvas.
+    for event in ["pointerdown", "pointermove", "pointerup", "pointercancel", "lostpointercapture"] {
+        let a = app.clone();
+        let cb = Closure::wrap(Box::new(move |ev: web_sys::PointerEvent| {
+            let mut ap = a.borrow_mut();
+            let rect = ap.canvas.get_bounding_client_rect();
+            let x = (ev.client_x() as f64 - rect.left()) as f32;
+            let y = (ev.client_y() as f64 - rect.top()) as f32;
+            let hit = ap.ui.hit(x, y);
+            match event {
+                "pointerdown" if ev.is_primary() && ev.button() == 0 => {
+                    if let Some(id) = ap.ui.gesture.begin(ev.pointer_id(), hit) {
+                        ev.prevent_default();
+                        ap.ui.press[id] = 0.65; // visible at the first rendered frame
+                        let _ = ap.canvas.set_pointer_capture(ev.pointer_id());
+                    }
+                }
+                "pointermove" => ap.ui.gesture.update(ev.pointer_id(), hit),
+                "pointerup" | "pointercancel" | "lostpointercapture" => {
+                    let action = ap.ui.gesture.finish(ev.pointer_id(), hit, event != "pointerup");
+                    let _ = ap.canvas.release_pointer_capture(ev.pointer_id());
+                    if let Some(id) = action { ap.activate(id); }
+                }
+                _ => {}
+            }
+        }) as Box<dyn FnMut(_)>);
+        canvas.add_event_listener_with_callback(event, cb.as_ref().unchecked_ref()).map_err(|_| "pointer listener")?;
+        cb.forget();
+    }
+    // HTML supplies crisp labels and keyboard/screen-reader semantics only.
+    for id in 0..ui::COUNT {
+        let element = document.get_element_by_id(ui::IDS[id]).unwrap();
+        for event in ["click", "focus", "blur"] {
+            let a = app.clone();
+            let cb = Closure::wrap(Box::new(move |_: web_sys::Event| {
+                let mut ap = a.borrow_mut();
+                match event {
+                    "click" => { ap.ui.press[id] = 1.0; ap.activate(id); }
+                    "focus" => ap.ui.focus = Some(id),
+                    _ => ap.ui.focus = None,
+                }
+            }) as Box<dyn FnMut(_)>);
+            element.add_event_listener_with_callback(event, cb.as_ref().unchecked_ref()).unwrap();
+            cb.forget();
+        }
+    }
     {
         let a = app.clone();
-        let cb = Closure::wrap(Box::new(move |ev: web_sys::MouseEvent| {
-            if let Ok(mut ap) = a.try_borrow_mut() {
-                let canvas = ap.canvas.clone();
-                let dpr = ap.dpr;
-                let rect = canvas.get_bounding_client_rect();
-                let x = ((ev.client_x() as f64 - rect.left()) * dpr as f64) as f32;
-                let y = ((ev.client_y() as f64 - rect.top()) * dpr as f64) as f32;
-                ap.hit(x, y);
-            }
-        }) as Box<dyn FnMut(_)>);
-        let _ = canvas.add_event_listener_with_callback("mousedown", cb.as_ref().unchecked_ref());
-        cb.forget();
-
-        let a = app.clone();
         let cb = Closure::wrap(Box::new(move |ev: web_sys::KeyboardEvent| {
-            if let Ok(mut ap) = a.try_borrow_mut() {
-                let k = ev.key();
-                match k.as_str() {
-                    "1" | "2" | "3" | "4" | "5" => {
-                        let i = k.as_bytes()[0] as usize - b'1' as usize;
-                        ap.toggle(i);
-                    }
-                    " " => {
-                        ap.want_capture = true;
-                        ap.flash = 1.0;
-                        status("photo…");
-                    }
-                    "r" | "R" => {
-                        ap.recording = !ap.recording;
-                        js("velloCamRecord", &[JsValue::from_bool(ap.recording)]);
-                        status(if ap.recording {
-                            "enregistrement…"
-                        } else {
-                            "enregistrement arrêté"
-                        });
-                    }
-                    _ => {}
-                }
-            }
+            if ev.repeat() || ev.ctrl_key() || ev.alt_key() || ev.meta_key() { return; }
+            // Native buttons retain Space/Enter activation without a second action.
+            if ev.target().and_then(|e| e.dyn_into::<web_sys::Element>().ok())
+                .is_some_and(|e| e.tag_name() == "BUTTON") { return; }
+            let key = ev.key();
+            let id = match key.as_str() {
+                "1" | "2" | "3" | "4" | "5" | "6" => Some(key.as_bytes()[0] as usize - b'1' as usize),
+                " " => Some(6), "r" | "R" => Some(7), "g" | "G" => Some(8), "0" => Some(9),
+                _ => None,
+            };
+            if let Some(id) = id { ev.prevent_default(); let mut ap = a.borrow_mut(); ap.ui.press[id] = 1.0; ap.activate(id); }
         }) as Box<dyn FnMut(_)>);
-        let _ = window.add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
+        window.add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref()).unwrap();
+        cb.forget();
+        let a = app.clone();
+        let cb = Closure::wrap(Box::new(move |_: web_sys::Event| {
+            let mut ap = a.borrow_mut(); ap.ui.gesture.clear();
+        }) as Box<dyn FnMut(_)>);
+        window.add_event_listener_with_callback("blur", cb.as_ref().unchecked_ref()).unwrap();
         cb.forget();
     }
 

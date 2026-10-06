@@ -20,7 +20,7 @@ bytemuck = { version = "1", features = ["derive"] }
 version = "0.3"
 features = [
   "Document", "Window", "HtmlCanvasElement", "HtmlVideoElement", "Element",
-  "HtmlElement", "Event", "EventTarget", "MouseEvent", "KeyboardEvent",
+  "HtmlElement", "Event", "EventTarget", "PointerEvent", "KeyboardEvent", "CssStyleDeclaration",
   "Performance", "DomRect", "console",
 ]
 
