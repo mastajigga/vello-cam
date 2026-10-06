@@ -1,0 +1,7 @@
+# fichiers de compilation Rust / wasm
+/target/
+/pkg/
+
+# divers
+.DS_Store
+*.log

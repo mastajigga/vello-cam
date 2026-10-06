@@ -1,0 +1,29 @@
+[package]
+name = "vello-cam"
+version = "0.2.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vello_gpu = { version = "0.3", features = ["text", "wgpu", "wgpu_default"] }
+vello_common = "0.3"
+wgpu = { version = "30", features = ["webgpu"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  "Document", "Window", "HtmlCanvasElement", "HtmlVideoElement", "Element",
+  "HtmlElement", "Event", "EventTarget", "MouseEvent", "KeyboardEvent",
+  "Performance", "DomRect", "console",
+]
+
+[profile.release]
+opt-level = "s"
+lto = true

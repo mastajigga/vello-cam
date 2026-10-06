@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>vello-cam — caméra GPU</title>
+<style>
+  :root{
+    --accent:#4cf0d6;
+    --ink:#eef2f6;
+    --muted:#8f98a6;
+    --line:rgba(255,255,255,.10);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#06070a;overflow:hidden;
+    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,system-ui,sans-serif;
+    color:var(--ink);-webkit-font-smoothing:antialiased}
+  #gpu{display:block;width:100vw;height:100vh;cursor:pointer}
+
+  /* sources jamais montrées : elles n'alimentent que des textures GPU */
+  #cam{position:fixed;left:-8px;top:-8px;width:2px;height:2px;opacity:.01;pointer-events:none}
+  #copy{display:none}
+
+  .bar{position:fixed;inset:0 0 auto 0;display:flex;align-items:flex-start;justify-content:space-between;
+    gap:16px;padding:18px 22px;pointer-events:none;
+    background:linear-gradient(180deg,rgba(4,6,10,.74),rgba(4,6,10,0))}
+  .brand{display:flex;align-items:center;gap:10px;min-width:0}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 0 4px rgba(76,240,214,.14)}
+  .name{font-weight:650;letter-spacing:.02em}
+  .tag{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:999px;
+    padding:2px 9px;white-space:nowrap}
+  .right{text-align:right;font-size:12px;color:var(--muted)}
+  #hud{font-variant-numeric:tabular-nums;color:var(--ink);opacity:.85}
+  #stat{margin-top:3px}
+
+  .legend{position:fixed;left:22px;top:74px;display:flex;flex-wrap:wrap;gap:4px 14px;
+    max-width:min(560px,72vw);pointer-events:none;font-size:12px;color:var(--muted)}
+  .legend b{color:var(--ink);font-weight:600}
+  kbd{font:inherit;font-size:11px;border:1px solid var(--line);border-bottom-width:2px;
+    border-radius:5px;padding:1px 5px;color:var(--ink);background:rgba(255,255,255,.05)}
+
+  .foot{position:fixed;left:22px;bottom:14px;font-size:11px;color:var(--muted);opacity:.62;
+    pointer-events:none;max-width:46vw}
+
+  .overlay{position:fixed;inset:0;display:grid;place-items:center;text-align:center;padding:28px;
+    background:rgba(6,7,10,.86);backdrop-filter:blur(8px);z-index:5}
+  .overlay.hide{display:none}
+  .overlay h1{font-size:17px;margin:0 0 8px;font-weight:650}
+  .overlay p{margin:0 0 16px;color:var(--muted);font-size:13px;max-width:44ch}
+  .overlay code{background:rgba(255,255,255,.07);border:1px solid var(--line);
+    border-radius:6px;padding:2px 7px;font-size:12px}
+  button{font:inherit;font-weight:600;color:#04120f;background:var(--accent);border:0;
+    border-radius:10px;padding:11px 18px;cursor:pointer}
+  button:active{transform:translateY(1px)}
+  .spinner{width:22px;height:22px;border:2px solid rgba(255,255,255,.18);
+    border-top-color:var(--accent);border-radius:50%;margin:0 auto 14px;
+    animation:spin .9s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+  <canvas id="gpu"></canvas>
+  <video id="cam" playsinline muted autoplay></video>
+  <canvas id="copy"></canvas>
+
+  <div class="bar">
+    <div class="brand">
+      <span class="dot"></span>
+      <span class="name">vello-cam</span>
+      <span class="tag">Rust → WASM → WebGPU</span>
+    </div>
+    <div class="right">
+      <div id="hud">—</div>
+      <div id="stat">initialisation…</div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><kbd>1</kbd> <b>N&amp;B</b></span>
+    <span><kbd>2</kbd> <b>Sépia</b></span>
+    <span><kbd>3</kbd> <b>Flou</b></span>
+    <span><kbd>4</kbd> <b>Fisheye</b></span>
+    <span><kbd>5</kbd> <b>Vignette</b></span>
+    <span><kbd>Espace</kbd> photo</span>
+    <span><kbd>R</kbd> vidéo</span>
+  </div>
+
+  <div class="foot">filtres WGSL en ping-pong · UI vectorielle vello_gpu composée en SrcOver</div>
+
+  <div class="overlay" id="boot">
+    <div>
+      <div class="spinner"></div>
+      <h1>Chargement du moteur GPU…</h1>
+      <p>Rust compilé en WebAssembly, rendu WebGPU. L'autorisation caméra va être demandée.</p>
+    </div>
+  </div>
+
+  <div class="overlay hide" id="err">
+    <div>
+      <h1 id="errh">WebGPU indisponible</h1>
+      <p id="errp">Ce navigateur n'expose pas <code>navigator.gpu</code>. Essaie Chrome ou Edge récents.</p>
+      <button id="go" hidden>Démarrer la caméra</button>
+    </div>
+  </div>
+
+<script>
+/* ------------------------------------------------------------------ *
+ *  Pont JS <-> Rust (Rust appelle ces fonctions par réflexion globale) *
+ * ------------------------------------------------------------------ */
+const $ = (id) => document.getElementById(id);
+
+function saveBlob(blob, name){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
+}
+
+window.velloCamStatus = (s) => { $('stat').textContent = s; };
+window.velloCamHud    = (fps, w, h) => { $('hud').textContent = `${Math.round(fps)} fps · ${w}×${h}`; };
+window.velloCamSource = () => {};
+window.velloCamReady  = () => { $('boot').classList.add('hide'); };
+
+/* photo : Rust relit les pixels côté GPU et nous passe un RGBA brut */
+window.velloCamExportPhoto = (arr, w, h) => {
+  const t0 = performance.now();
+  const u8 = new Uint8Array(arr);
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(u8.buffer), w, h), 0, 0);
+  const t1 = performance.now();
+  cv.toBlob((b) => {
+    console.log(`[vello-cam] t=${performance.now().toFixed(0)} png=${b.size} (copie ${(t1-t0).toFixed(0)} ms, encodage ${(performance.now()-t1).toFixed(0)} ms)`);
+    saveBlob(b, `vello-cam-${Date.now()}.png`);
+    window.velloCamStatus('photo enregistrée');
+  }, 'image/png');
+};
+
+/* vidéo : on capture le canvas WebGPU tel quel (filtres + UI compris) */
+window.velloCamRecord = (on) => {
+  const cv = $('gpu');
+  if (on) {
+    try {
+      const types = ['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm','video/mp4'];
+      const mime = types.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t));
+      const chunks = [];
+      const rec = new MediaRecorder(cv.captureStream(60), mime ? { mimeType: mime } : undefined);
+      rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      rec.onstop = () => saveBlob(new Blob(chunks, { type: mime || 'video/webm' }),
+                                  `vello-cam-${Date.now()}.webm`);
+      rec.start();
+      window.__rec = rec;
+      window.velloCamStatus('enregistrement…');
+    } catch (e) { window.velloCamStatus('vidéo impossible : ' + e.name); }
+  } else if (window.__rec) {
+    window.__rec.stop();
+    window.__rec = null;
+    window.velloCamStatus('vidéo enregistrée');
+  }
+};
+
+/* ------------------------------------------------------------------ *
+ *  Caméra : le seul endroit en JS (contraintes + sonde de capacité)    *
+ * ------------------------------------------------------------------ */
+async function startCamera(){
+  const v = $('cam');
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width:{ideal:1280}, height:{ideal:720}, frameRate:{ideal:60}, facingMode:'user' },
+      audio: false
+    });
+    v.srcObject = stream;
+    await v.play();
+    if (!v.videoWidth) {
+      await new Promise((r) => v.addEventListener('loadedmetadata', r, { once:true }));
+    }
+    $('go').hidden = true;
+    return true;
+  } catch (e) {
+    window.velloCamStatus('caméra refusée (' + e.name + ')');
+    $('errh').textContent = 'Caméra indisponible';
+    $('errp').innerHTML = 'Le navigateur a refusé l\'accès (' + e.name + '). Autorise la caméra, ' +
+      'puis réessaie — ou ouvre la page sur <code>localhost</code> / une URL HTTPS.';
+    $('go').hidden = false;
+    $('err').classList.remove('hide');
+    return false;
+  }
+}
+
+/* Chromium/NVIDIA accepte de copier <video> directement en texture GPU.
+   Certains backends (Dawn sur SwiftShader) refusent : on sonde, puis on choisit. */
+async function probeDirectVideoCopy(){
+  try {
+    const ad = await navigator.gpu.requestAdapter();
+    const dev = await ad.requestDevice();
+    const v = $('cam');
+    if (!v.videoWidth) return false;
+    const t = dev.createTexture({ size:[16,16], format:'rgba8unorm', mipLevelCount:1, sampleCount:1,
+      dimension:'2d',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING });
+    dev.pushErrorScope('validation');
+    dev.queue.copyExternalImageToTexture({ source:v, flipY:false },
+      { texture:t, mipLevel:0, origin:[0,0,0], aspect:'all', colorSpace:'srgb', premultipliedAlpha:false },
+      [16,16]);
+    const err = await dev.popErrorScope();
+    return !err;
+  } catch (e) { return false; }
+}
+
+/* Repli : le <video> est recopié chaque frame dans un canvas 2D, que le GPU lit. */
+function startMirror(){
+  const v = $('cam'), c = $('copy');
+  c.width  = v.videoWidth  || 1280;
+  c.height = v.videoHeight || 720;
+  const ctx = c.getContext('2d', { alpha:false, desynchronized:true });
+  const loop = () => { ctx.drawImage(v, 0, 0, c.width, c.height); requestAnimationFrame(loop); };
+  loop();
+}
+
+$('go').addEventListener('click', async () => { await run(); });
+
+/* ------------------------------------------------------------------ */
+async function run(){
+  if (!('gpu' in navigator)) {
+    $('boot').classList.add('hide');
+    $('err').classList.remove('hide');
+    return;
+  }
+  const ok = await startCamera();
+  let direct = false;
+  if (ok) {
+    direct = await probeDirectVideoCopy();
+    if (!direct) startMirror();
+  }
+  window.velloCamDirectVideo = direct;
+  window.velloCamStatus(ok
+    ? (direct ? 'caméra prête · copie GPU directe' : 'caméra prête · repli copie 2D')
+    : 'sans caméra');
+  console.log('[vello-cam] copie video directe : ' + direct);
+
+  try {
+    const m = await import('./pkg/vello_cam.js');
+    m.default();
+  } catch (e) {
+    $('boot').classList.add('hide');
+    $('errh').textContent = 'Erreur au chargement du WASM';
+    $('errp').innerHTML = '<code>' + e + '</code>';
+    $('err').classList.remove('hide');
+  }
+}
+run();
+</script>
+</body>
+</html>
